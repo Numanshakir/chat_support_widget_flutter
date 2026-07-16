@@ -11,6 +11,18 @@ class SupportUserData {
     this.metadata,
   });
 
+  SupportUserData copyWith({
+    String? name,
+    String? email,
+    Map<String, dynamic>? metadata,
+  }) {
+    return SupportUserData(
+      name: name ?? this.name,
+      email: email ?? this.email,
+      metadata: metadata ?? this.metadata,
+    );
+  }
+
   /// Converts user data to a JSON map.
   Map<String, dynamic> toJson() {
     return {

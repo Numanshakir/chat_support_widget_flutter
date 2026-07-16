@@ -7,8 +7,46 @@ A premium, customizable Flutter chatbot package designed exactly to match your c
 ## Features
 - **Visual Fidelity:** Replicates the premium support agent interface (blue header, online status indicator, concierge/bell banner, styled bubbles, custom avatars).
 - **Demographic Context Integration:** Automatically appends provided `SupportUserData` (name, email, tier, app metadata) into system instructions for customized AI messaging.
-- **Robust Integration:** Direct lightweight HTTP interface with Google's Gemini (`gemini-1.5-flash`) by default, avoiding package/version dependency conflicts.
+- **Visitor SDK:** JSON visitor endpoints (`/chatscript/visitor/session`, `/polling`, `/activity`) with Socket.IO realtime and polling fallback.
+- **Robust Integration:** Direct lightweight HTTP interface with Google's Gemini by default, or chatscript visitor backend via `visitorConfig`.
 - **100% UI Customization:** Complete layout customizability using custom builders (`headerBuilder`, `subHeaderBuilder`, `bubbleBuilder`, and `inputBuilder`).
+
+---
+
+## Visitor SDK Backend
+
+Wire the chatscript visitor JSON API (session, activity, polling, Socket.IO) without changing the chat UI:
+
+```dart
+SupportChatWidget(
+  config: SupportChatConfig(
+    visitorConfig: VisitorConfig(
+      baseUrl: 'https://your-chatscript-host',
+      tenantId: 'tenant-id',
+      url: 'https://example.com',
+      title: 'Home',
+      isMobile: true,
+      domain: 'example.com',
+      enableSocket: true,
+    ),
+    userData: const SupportUserData(
+      name: 'Imran',
+      email: 'imran@example.com',
+    ),
+  ),
+)
+```
+
+Architecture:
+
+- `VisitorConfig` — client options
+- `VisitorRemoteDataSource` — HTTP `/chatscript/visitor/*`
+- `VisitorSocketDataSource` — Socket.IO (`message_to_client`, `typing`)
+- `VisitorRepository` — domain contract
+- `VisitorChatService` — orchestrates session → poll/socket → activity
+
+Gemini remains available via `apiKey`; custom backends via `customService`.
+
 
 ---
 

@@ -1,38 +1,32 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import '../core/config/visitor_config.dart';
+
 import '../models/chat_message.dart';
 import '../models/user_data.dart';
 import '../models/attachment_file.dart';
+import '../services/chat_service_event.dart';
 import '../services/chatbot_service.dart';
+import '../services/visitor_chat_service.dart';
 
-/// Configuration options for the support chat UI and backend.
 class SupportChatConfig {
-  /// Gemini API Key to power the chatbot.
   final String? apiKey;
-
-  /// User demographic details to personalize chatbot context.
   final SupportUserData? userData;
-
-  /// Unique Device ID used for anonymous users if [userData] is null.
   final String? deviceId;
 
-  /// Custom implementation of [ChatbotService]. If not provided,
-  /// [GeminiChatbotService] is used by default (requires [apiKey]).
   final ChatbotService? customService;
 
-  /// Bot name shown on assistant messages. Defaults to "AI Assistant".
+  final VisitorConfig? visitorConfig;
+
   final String botName;
 
-  /// Title shown in the main header. Defaults to "support".
   final String headerTitle;
-
-  /// Title shown in the sub-header. Defaults to "live support".
   final String subHeaderTitle;
 
-  /// Subtitle shown in the sub-header. Defaults to "Ask us anything".
   final String subHeaderSubtitle;
 
-  /// Custom system instructions to modify AI behavior.
   final String? systemInstructions;
 
   const SupportChatConfig({
@@ -40,14 +34,15 @@ class SupportChatConfig {
     this.userData,
     this.deviceId,
     this.customService,
+    this.visitorConfig,
     this.botName = 'AI Assistant',
     this.headerTitle = 'support',
     this.subHeaderTitle = 'live support',
     this.subHeaderSubtitle = 'Ask us anything',
     this.systemInstructions,
   }) : assert(
-         apiKey != null || customService != null,
-         'Either apiKey or customService must be provided.',
+         apiKey != null || customService != null || visitorConfig != null,
+         'Either apiKey, customService, or visitorConfig must be provided.',
        );
 }
 
@@ -84,6 +79,9 @@ typedef InputAreaBuilder =
 class SupportChatWidget extends StatefulWidget {
   final SupportChatConfig config;
 
+  /// Callback when a visitor session is created / reconnected.
+  final void Function(String tenantId, String sessionId)? onSessionReady;
+
   /// Callback when the "Please update your info" action link is pressed.
   final VoidCallback? onUpdateInfoPressed;
 
@@ -116,6 +114,7 @@ class SupportChatWidget extends StatefulWidget {
   const SupportChatWidget({
     Key? key,
     required this.config,
+    this.onSessionReady,
     this.onUpdateInfoPressed,
     this.onExitPressed,
     this.onAttachmentPressed,
@@ -137,10 +136,17 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   late final ChatbotService _chatbotService;
+  StreamSubscription<ChatServiceEvent>? _eventsSubscription;
   bool _isTyping = false;
   bool _isOnline = true;
+  bool _sessionReady = false;
   AttachmentFile? _pendingAttachment;
   late final String _activeDeviceId;
+  SupportUserData? _localUserData;
+  bool _sessionLoggedOut = false;
+  bool _isSoundOn = true;
+  final LayerLink _menuLayerLink = LayerLink();
+  OverlayEntry? _menuOverlayEntry;
 
   @override
   void initState() {
@@ -154,6 +160,8 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
     // Initialize chatbot backend service
     if (widget.config.customService != null) {
       _chatbotService = widget.config.customService!;
+    } else if (widget.config.visitorConfig != null) {
+      _chatbotService = VisitorChatService(widget.config.visitorConfig!);
     } else {
       _chatbotService = GeminiChatbotService(
         apiKey: widget.config.apiKey!,
@@ -164,12 +172,89 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
     }
 
     // Load initial greeting and system state
+    _localUserData = widget.config.userData;
     _messages.add(ChatMessage.system('ended the chat'));
     _messages.add(ChatMessage.assistant('Hi! How can I help you today?'));
+
+    _eventsSubscription = _chatbotService.events.listen(_onChatServiceEvent);
+    unawaited(_bootstrapService());
+  }
+
+  Future<void> _bootstrapService() async {
+    try {
+      await _chatbotService.start();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isOnline = false;
+        _messages.add(
+          ChatMessage.system(
+            'Error: Could not start support session. Please try again.',
+          ),
+        );
+      });
+    }
+  }
+
+  void _onChatServiceEvent(ChatServiceEvent event) {
+    if (!mounted) return;
+
+    switch (event) {
+      case IncomingMessageEvent(:final message):
+        setState(() {
+          _messages.add(message);
+          _isTyping = false;
+        });
+        _scrollToBottom();
+      case TypingEvent(:final isTyping):
+        setState(() => _isTyping = isTyping);
+      case ConnectionStatusEvent(:final isOnline):
+        setState(() => _isOnline = isOnline);
+      case SessionReadyEvent(:final sessionId, :final tenantId):
+        setState(() {
+          _isOnline = true;
+          _sessionReady = true;
+          _messages.add(
+            ChatMessage.system(
+              'Session ready · chat with session $sessionId',
+            ),
+          );
+        });
+        widget.onSessionReady?.call(tenantId, sessionId);
+        assert(() {
+          debugPrint(
+            '[SupportChat] session ready tenant=$tenantId session=$sessionId',
+          );
+          return true;
+        }());
+      case FormNoticeEvent(:final message):
+        setState(() {
+          _messages.add(message);
+          _isTyping = false;
+        });
+        _scrollToBottom();
+      case SessionEndedEvent():
+        setState(() {
+          _sessionReady = false;
+          _sessionLoggedOut = true;
+          _isOnline = false;
+          _isTyping = false;
+          _messages.add(ChatMessage.system('ended the chat'));
+        });
+      case ChatServiceErrorEvent(:final message):
+        assert(() {
+          debugPrint('[SupportChat] service error: $message');
+          return true;
+        }());
+        break;
+    }
   }
 
   @override
   void dispose() {
+    _hideMenu();
+    _eventsSubscription?.cancel();
+    unawaited(_chatbotService.dispose());
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -209,6 +294,21 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
     final text = _inputController.text.trim();
     if (text.isEmpty && _pendingAttachment == null) return;
 
+    // Visitor SDK: wait until POST /session finished and sessionId exists.
+    if (widget.config.visitorConfig != null &&
+        (!_sessionReady || _sessionLoggedOut)) {
+      setState(() {
+        _messages.add(
+          ChatMessage.system(
+            _sessionLoggedOut
+                ? 'Chat ended. Please start a new session.'
+                : 'Please wait — creating visitor session...',
+          ),
+        );
+      });
+      return;
+    }
+
     // Use placeholder text if only an image is sent
     final messageText = text.isEmpty ? "Sent an image attachment" : text;
 
@@ -243,20 +343,32 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
       final reply = await _chatbotService.sendMessage(
         content: messageText,
         history: _messages,
-        userData: widget.config.userData,
+        userData: _localUserData ?? widget.config.userData,
         deviceId: _activeDeviceId,
       );
 
-      setState(() {
-        _messages.add(ChatMessage.assistant(reply));
-        _isTyping = false;
-      });
+      // Realtime backends (visitor SDK) deliver agent replies via events.
+      if (_chatbotService.usesRealtimeDelivery || reply == null) {
+        // Keep typing indicator while waiting for bot/agent; clear on timeout.
+        Future<void>.delayed(const Duration(seconds: 45), () {
+          if (mounted && _isTyping) {
+            setState(() => _isTyping = false);
+          }
+        });
+      } else {
+        setState(() {
+          _messages.add(ChatMessage.assistant(reply));
+          _isTyping = false;
+        });
+      }
     } catch (e) {
       setState(() {
         _messages.add(
           ChatMessage(
             id: DateTime.now().microsecondsSinceEpoch.toString(),
-            content: 'Error: Could not connect to support. Please try again.',
+            content: e.toString().contains('Internal server error')
+                ? 'Error: Server rejected the message (check tenant id / backend).'
+                : 'Error: Could not connect to support. Please try again.',
             sender: MessageSender.system,
             timestamp: DateTime.now(),
           ),
@@ -268,6 +380,243 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
     _scrollToBottom();
   }
 
+  Future<void> _handleUpdateInfoPressed() async {
+    widget.onUpdateInfoPressed?.call();
+    if (widget.config.visitorConfig == null) {
+      return;
+    }
+    await _showUpdateInfoDialog();
+  }
+
+  Future<void> _showUpdateInfoDialog() async {
+    final result = await showDialog<SupportUserData>(
+      context: context,
+      builder: (dialogContext) {
+        return _UpdateInfoDialog(
+          initialName:
+              _localUserData?.name ?? widget.config.userData?.name ?? '',
+          initialEmail:
+              _localUserData?.email ?? widget.config.userData?.email ?? '',
+          sessionReady: _sessionReady,
+          onSubmit: (name, email) async {
+            await _chatbotService.updateVisitorInfo(
+              name: name,
+              email: email,
+            );
+          },
+        );
+      },
+    );
+
+    if (!mounted || result == null) return;
+
+    setState(() {
+      _localUserData = result;
+    });
+  }
+
+  Future<void> _showEmailTranscriptDialog() async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return _EmailTranscriptDialog(
+          initialEmail:
+              _localUserData?.email ?? widget.config.userData?.email ?? '',
+          sessionReady: _sessionReady,
+          onSubmit: (email) async {
+            final currentName = _localUserData?.name ?? widget.config.userData?.name ?? '';
+            await _chatbotService.updateVisitorInfo(
+              name: currentName,
+              email: email,
+            );
+          },
+        );
+      },
+    );
+
+    if (result != null && result.isNotEmpty && mounted) {
+      setState(() {
+        _localUserData = (_localUserData ?? const SupportUserData()).copyWith(email: result);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Transcript will be sent to $result')),
+      );
+    }
+  }
+
+  void _toggleMenu() {
+    if (_menuOverlayEntry != null) {
+      _hideMenu();
+    } else {
+      _showMenu();
+    }
+  }
+
+  void _hideMenu() {
+    _menuOverlayEntry?.remove();
+    _menuOverlayEntry = null;
+  }
+
+  void _showMenu() {
+    _menuOverlayEntry = OverlayEntry(
+      builder: (context) {
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: _hideMenu,
+          child: Stack(
+            children: [
+              Positioned(
+                child: CompositedTransformFollower(
+                  link: _menuLayerLink,
+                  showWhenUnlinked: false,
+                  targetAnchor: Alignment.topRight,
+                  followerAnchor: Alignment.bottomRight,
+                  offset: const Offset(0, -8),
+                  child: Material(
+                    color: Colors.transparent,
+                    child: _buildMenuContent(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    Overlay.of(context).insert(_menuOverlayEntry!);
+  }
+
+  Widget _buildMenuContent() {
+    return Container(
+      width: 240,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildMenuItem(
+            title: 'Sound',
+            trailing: Text(
+              _isSoundOn ? 'On' : 'Off',
+              style: const TextStyle(
+                fontSize: 14,
+                color: Color(0xFF6B7280),
+              ),
+            ),
+            onTap: () {
+              setState(() {
+                _isSoundOn = !_isSoundOn;
+              });
+              _menuOverlayEntry?.markNeedsBuild();
+            },
+          ),
+          _buildMenuItem(
+            title: 'Email Transcript',
+            onTap: () {
+              _hideMenu();
+              _showEmailTranscriptDialog();
+            },
+          ),
+          _buildMenuItem(
+            title: 'Edit Contact detail',
+            onTap: () {
+              _hideMenu();
+              _showUpdateInfoDialog();
+            },
+          ),
+          _buildMenuItem(
+            title: 'End Chat',
+            onTap: () {
+              _hideMenu();
+              _handleExitPressed();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMenuItem({
+    required String title,
+    Widget? trailing,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w500,
+                  color: Color(0xFF1B2538),
+                ),
+              ),
+            ),
+            if (trailing != null) trailing,
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _handleExitPressed() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Logout'),
+          content: const Text(
+            'Are you sure you want to end this chat session?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Logout'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await _chatbotService.logout();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _sessionReady = false;
+        _sessionLoggedOut = true;
+        _isOnline = false;
+        _isTyping = false;
+        _messages.add(ChatMessage.system('ended the chat'));
+      });
+    }
+
+    widget.onExitPressed?.call();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -275,7 +624,7 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24.0)),
       clipBehavior: Clip.antiAlias,
-      child: Container(
+      child: Material(
         color: Colors.white,
         child: Column(
           children: [
@@ -289,12 +638,14 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
                 ? widget.subHeaderBuilder!(context, widget.config)
                 : _buildDefaultSubHeader(),
 
-            // 3. Chat Message Log
+            // 3. Chat Message Log — Expanded so keyboard shrinks this area.
             Expanded(
               child: Container(
                 color: widget.backgroundColor,
                 child: ListView.builder(
                   controller: _scrollController,
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 16.0,
                     vertical: 12.0,
@@ -489,6 +840,34 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
   }
 
   Widget _buildDefaultSystemMessage(ChatMessage message) {
+    if (message.style == ChatMessageStyle.centeredNotice) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10.0),
+        child: Center(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 300.0),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 16.0,
+              vertical: 10.0,
+            ),
+            decoration: BoxDecoration(
+              color: Colors.black87,
+              borderRadius: BorderRadius.circular(10.0),
+            ),
+            child: Text(
+              message.content,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13.0,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     if (message.content.contains('ended the chat')) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 8.0),
@@ -645,7 +1024,7 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
                 if (hasUpdateInfoLink) ...[
                   const SizedBox(height: 12.0),
                   InkWell(
-                    onTap: widget.onUpdateInfoPressed,
+                    onTap: _handleUpdateInfoPressed,
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 24.0),
                       child: Text(
@@ -746,16 +1125,19 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
             children: [
               IconButton(
                 icon: const Icon(Icons.exit_to_app, color: Colors.black54),
-                onPressed: widget.onExitPressed,
+                onPressed: _handleExitPressed,
               ),
               // Attachment selection handler
               IconButton(
                 icon: const Icon(Icons.attach_file, color: Colors.black54),
                 onPressed: _handleAttachmentSelection,
               ),
-              IconButton(
-                icon: const Icon(Icons.more_horiz, color: Colors.black54),
-                onPressed: widget.onMenuPressed,
+              CompositedTransformTarget(
+                link: _menuLayerLink,
+                child: IconButton(
+                  icon: const Icon(Icons.more_horiz, color: Colors.black54),
+                  onPressed: _toggleMenu,
+                ),
               ),
               const Spacer(),
               ElevatedButton(
@@ -781,6 +1163,508 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _UpdateInfoDialog extends StatefulWidget {
+  final String initialName;
+  final String initialEmail;
+  final bool sessionReady;
+  final Future<void> Function(String name, String email) onSubmit;
+
+  const _UpdateInfoDialog({
+    required this.initialName,
+    required this.initialEmail,
+    required this.sessionReady,
+    required this.onSubmit,
+  });
+
+  @override
+  State<_UpdateInfoDialog> createState() => _UpdateInfoDialogState();
+}
+
+class _UpdateInfoDialogState extends State<_UpdateInfoDialog> {
+  late final TextEditingController _nameController;
+  late final TextEditingController _emailController;
+  bool _isSubmitting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: widget.initialName);
+    _emailController = TextEditingController(text: widget.initialEmail);
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _emailController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final name = _nameController.text.trim();
+    final email = _emailController.text.trim();
+
+    if (name.isEmpty || email.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter name and email.')),
+      );
+      return;
+    }
+
+    if (!widget.sessionReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please wait — visitor session is not ready yet.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isSubmitting = true);
+
+    try {
+      await widget.onSubmit(name, email);
+      if (!mounted) return;
+      Navigator.of(context).pop(
+        SupportUserData(name: name, email: email),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not update info: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Container(
+        width: 380,
+        padding: const EdgeInsets.only(bottom: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: 24,
+                vertical: 20,
+              ),
+              child: Text(
+                'Edit contact details',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1B2538),
+                ),
+              ),
+            ),
+            const Divider(
+              height: 1,
+              thickness: 1,
+              color: Color(0xFFE2E8F0),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'Name',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF384A62),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _nameController,
+                    enabled: !_isSubmitting,
+                    decoration: InputDecoration(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
+                      filled: true,
+                      fillColor: Colors.white,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(
+                          color: Color(0xFFD3DDF6),
+                          width: 1,
+                        ),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(
+                          color: Color(0xFFD3DDF6),
+                          width: 1,
+                        ),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(
+                          color: Color(0xFF4F46E5),
+                          width: 1.5,
+                        ),
+                      ),
+                    ),
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    'Email',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF384A62),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _emailController,
+                    enabled: !_isSubmitting,
+                    decoration: InputDecoration(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
+                      filled: true,
+                      fillColor: Colors.white,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(
+                          color: Color(0xFFD3DDF6),
+                          width: 1,
+                        ),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(
+                          color: Color(0xFFD3DDF6),
+                          width: 1,
+                        ),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(
+                          color: Color(0xFF4F46E5),
+                          width: 1.5,
+                        ),
+                      ),
+                    ),
+                    keyboardType: TextInputType.emailAddress,
+                    onSubmitted: (_) => _save(),
+                  ),
+                  const SizedBox(height: 32),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      OutlinedButton(
+                        onPressed: _isSubmitting
+                            ? null
+                            : () => Navigator.of(context).pop(),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFF384A62),
+                          side: const BorderSide(
+                            color: Color(0xFFD3DDF6),
+                            width: 1,
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 14,
+                          ),
+                        ),
+                        child: const Text(
+                          'Cancel',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      ElevatedButton(
+                        onPressed: _isSubmitting ? null : _save,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFD9730D),
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 32,
+                            vertical: 14,
+                          ),
+                        ),
+                        child: _isSubmitting
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor:
+                                      AlwaysStoppedAnimation<Color>(Colors.white),
+                                ),
+                              )
+                            : const Text(
+                                'Save',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EmailTranscriptDialog extends StatefulWidget {
+  final String initialEmail;
+  final bool sessionReady;
+  final Future<void> Function(String email) onSubmit;
+
+  const _EmailTranscriptDialog({
+    required this.initialEmail,
+    required this.sessionReady,
+    required this.onSubmit,
+  });
+
+  @override
+  State<_EmailTranscriptDialog> createState() => _EmailTranscriptDialogState();
+}
+
+class _EmailTranscriptDialogState extends State<_EmailTranscriptDialog> {
+  late final TextEditingController _emailController;
+  bool _isSubmitting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _emailController = TextEditingController(text: widget.initialEmail);
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final email = _emailController.text.trim();
+
+    if (email.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter an email.')),
+      );
+      return;
+    }
+
+    if (!widget.sessionReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please wait — visitor session is not ready yet.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isSubmitting = true);
+
+    try {
+      await widget.onSubmit(email);
+      if (!mounted) return;
+      Navigator.of(context).pop(email);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not request transcript: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Container(
+        width: 380,
+        padding: const EdgeInsets.only(bottom: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: 24,
+                vertical: 20,
+              ),
+              child: Text(
+                'Email chat Transcript',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1B2538),
+                ),
+              ),
+            ),
+            const Divider(
+              height: 1,
+              thickness: 1,
+              color: Color(0xFFE2E8F0),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'Email',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF384A62),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _emailController,
+                    enabled: !_isSubmitting,
+                    decoration: InputDecoration(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
+                      filled: true,
+                      fillColor: Colors.white,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(
+                          color: Color(0xFFD3DDF6),
+                          width: 1,
+                        ),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(
+                          color: Color(0xFFD3DDF6),
+                          width: 1,
+                        ),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(
+                          color: Color(0xFF4F46E5),
+                          width: 1.5,
+                        ),
+                      ),
+                    ),
+                    keyboardType: TextInputType.emailAddress,
+                    onSubmitted: (_) => _save(),
+                  ),
+                  const SizedBox(height: 32),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      OutlinedButton(
+                        onPressed: _isSubmitting
+                            ? null
+                            : () => Navigator.of(context).pop(),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFF384A62),
+                          side: const BorderSide(
+                            color: Color(0xFFD3DDF6),
+                            width: 1,
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 14,
+                          ),
+                        ),
+                        child: const Text(
+                          'Cancel',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      ElevatedButton(
+                        onPressed: _isSubmitting ? null : _save,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFD9730D),
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 32,
+                            vertical: 14,
+                          ),
+                        ),
+                        child: _isSubmitting
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor:
+                                      AlwaysStoppedAnimation<Color>(Colors.white),
+                                ),
+                              )
+                            : const Text(
+                                'Save',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
