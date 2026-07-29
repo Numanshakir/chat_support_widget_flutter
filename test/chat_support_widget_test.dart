@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:support_chat/support_chat.dart';
+import 'package:chat_support_widget/chat_support_widget.dart';
 
 void main() {
   test('SupportUserData JSON conversion', () {

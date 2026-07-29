@@ -3,7 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:support_chat/support_chat.dart';
+import 'package:chat_support_widget/chat_support_widget.dart';
 
 import 'talk_troves_config.dart';
 
@@ -35,8 +35,11 @@ class SupportChatDemoPage extends StatefulWidget {
 class _SupportChatDemoPageState extends State<SupportChatDemoPage> {
   final ImagePicker _imagePicker = ImagePicker();
   int _chatInstance = 0;
+  bool _chatCreated = false;
+  bool _chatVisible = false;
+  bool _startNewSessionOnNextOpen = false;
 
-  /// Always create a NEW session with the configured tenant (no reconnect).
+  /// A new session is created only on the first open or after explicit logout.
   SupportChatConfig get _config {
     return SupportChatConfig(
       visitorConfig: VisitorConfig(
@@ -91,61 +94,34 @@ class _SupportChatDemoPageState extends State<SupportChatDemoPage> {
     };
   }
 
-  void _prepareNextChatSession() {
+  void _minimizeChat() {
     setState(() {
-      _chatInstance++;
+      _chatVisible = false;
+    });
+  }
+
+  void _endChatSession() {
+    setState(() {
+      _chatVisible = false;
+      _startNewSessionOnNextOpen = true;
     });
     if (kDebugMode) {
       debugPrint(
-        '[TalkTroves] Chat closed — next open will create a new session | '
+        '[TalkTroves] Chat ended — next open will create a new session | '
         'tenant=${TalkTrovesConfig.tenantId}',
       );
     }
   }
 
   void _openChatPopup() {
-    showDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      builder: (dialogContext) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          insetPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 24,
-          ),
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final width = math.min(380.0, constraints.maxWidth);
-              final height = math.min(600.0, constraints.maxHeight);
-
-              return SizedBox(
-                width: width,
-                height: height,
-                child: SupportChatWidget(
-                  key: ValueKey(_chatInstance),
-                  config: _config,
-                  onSessionReady: (tenantId, sessionId) {
-                    if (kDebugMode) {
-                      debugPrint(
-                        '[TalkTroves] Session created → chat with '
-                        'tid=$tenantId sid=$sessionId',
-                      );
-                    }
-                  },
-                  onExitPressed: () {
-                    Navigator.of(dialogContext).pop();
-                    _prepareNextChatSession();
-                  },
-                  onAttachmentPressed: _pickImageAttachment,
-                  onMenuPressed: () {},
-                ),
-              );
-            },
-          ),
-        );
-      },
-    );
+    setState(() {
+      if (_startNewSessionOnNextOpen) {
+        _chatInstance++;
+        _startNewSessionOnNextOpen = false;
+      }
+      _chatCreated = true;
+      _chatVisible = true;
+    });
   }
 
   @override
@@ -157,21 +133,117 @@ class _SupportChatDemoPageState extends State<SupportChatDemoPage> {
         backgroundColor: const Color(0xFF2B5AD9),
         foregroundColor: Colors.white,
       ),
-      body: const Center(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Text(
-            'Tap the chat button to open live support.',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 16, color: Colors.black54),
+      body: Stack(
+        children: [
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text(
+                'Tap the chat button to open live support.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16, color: Colors.black54),
+              ),
+            ),
           ),
-        ),
+          if (_chatCreated)
+            Visibility(
+              visible: _chatVisible,
+              maintainState: true,
+              maintainAnimation: true,
+              maintainSize: true,
+              child: _ChatPopupDialog(
+                chatInstance: _chatInstance,
+                config: _config,
+                onPickAttachment: _pickImageAttachment,
+                onMinimized: _minimizeChat,
+                onEnded: _endChatSession,
+              ),
+            ),
+        ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _openChatPopup,
-        backgroundColor: const Color(0xFF2B5AD9),
-        icon: const Icon(Icons.chat_bubble_outline),
-        label: const Text('Support'),
+      floatingActionButton: _chatVisible
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: _openChatPopup,
+              backgroundColor: const Color(0xFF2B5AD9),
+              icon: const Icon(Icons.chat_bubble_outline),
+              label: const Text('Support'),
+            ),
+    );
+  }
+}
+
+/// Chat overlay that stays mounted while minimized to preserve its session.
+class _ChatPopupDialog extends StatefulWidget {
+  final int chatInstance;
+  final SupportChatConfig config;
+  final Future<AttachmentFile?> Function() onPickAttachment;
+  final VoidCallback onMinimized;
+  final VoidCallback onEnded;
+
+  const _ChatPopupDialog({
+    required this.chatInstance,
+    required this.config,
+    required this.onPickAttachment,
+    required this.onMinimized,
+    required this.onEnded,
+  });
+
+  @override
+  State<_ChatPopupDialog> createState() => _ChatPopupDialogState();
+}
+
+class _ChatPopupDialogState extends State<_ChatPopupDialog> {
+  bool _isExpanded = false;
+
+  void _toggleExpand() {
+    setState(() {
+      _isExpanded = !_isExpanded;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.sizeOf(context);
+    final padding = MediaQuery.paddingOf(context);
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: _isExpanded
+          ? EdgeInsets.only(
+              top: padding.top,
+              bottom: padding.bottom,
+              left: padding.left,
+              right: padding.right,
+            )
+          : const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        width: _isExpanded
+            ? media.width - padding.left - padding.right
+            : math.min(380.0, media.width - 32),
+        height: _isExpanded
+            ? media.height - padding.top - padding.bottom
+            : math.min(600.0, media.height - 48),
+        child: SupportChatWidget(
+          key: ValueKey(widget.chatInstance),
+          config: widget.config,
+          isExpanded: _isExpanded,
+          onSessionReady: (tenantId, sessionId) {
+            if (kDebugMode) {
+              debugPrint(
+                '[TalkTroves] Session created → chat with '
+                'tid=$tenantId sid=$sessionId',
+              );
+            }
+          },
+          onMinimizePressed: widget.onMinimized,
+          onExpandPressed: _toggleExpand,
+          onExitPressed: widget.onEnded,
+          onAttachmentPressed: widget.onPickAttachment,
+          onMenuPressed: () {},
+        ),
       ),
     );
   }

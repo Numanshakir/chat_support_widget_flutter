@@ -1,21 +1,19 @@
-# Support Chat
+# chat_support_widget
 
-A premium, customizable Flutter chatbot package designed exactly to match your customer support interface. It provides a default high-fidelity UI integrated directly with Google's Gemini API, but allows developers to override and customize **every single visual component** (AppBar, Subheader, Chat Bubbles, and Chat Input Field).
+A Flutter package for live customer support chat using the **chatscript visitor JSON API** (session, activity, polling, Socket.IO). The default UI matches a premium support-agent interface and can be customized with builders for header, subheader, bubbles, and input.
 
 ---
 
 ## Features
-- **Visual Fidelity:** Replicates the premium support agent interface (blue header, online status indicator, concierge/bell banner, styled bubbles, custom avatars).
-- **Demographic Context Integration:** Automatically appends provided `SupportUserData` (name, email, tier, app metadata) into system instructions for customized AI messaging.
-- **Visitor SDK:** JSON visitor endpoints (`/chatscript/visitor/session`, `/polling`, `/activity`) with Socket.IO realtime and polling fallback.
-- **Robust Integration:** Direct lightweight HTTP interface with Google's Gemini by default, or chatscript visitor backend via `visitorConfig`.
-- **100% UI Customization:** Complete layout customizability using custom builders (`headerBuilder`, `subHeaderBuilder`, `bubbleBuilder`, and `inputBuilder`).
+
+- **Visitor SDK:** JSON endpoints (`/chatscript/visitor/session`, `/polling`, `/activity`) with Socket.IO realtime and polling fallback
+- **Live agent chat:** Session create/reconnect, send messages, forms (name/email), typing, logout/expire
+- **Visual fidelity:** Blue header, online status, welcome banner, styled bubbles, custom avatars
+- **UI customization:** Override layout with `headerBuilder`, `subHeaderBuilder`, `bubbleBuilder`, and `inputBuilder`
 
 ---
 
 ## Visitor SDK Backend
-
-Wire the chatscript visitor JSON API (session, activity, polling, Socket.IO) without changing the chat UI:
 
 ```dart
 SupportChatWidget(
@@ -37,18 +35,6 @@ SupportChatWidget(
 )
 ```
 
-Architecture:
-
-- `VisitorConfig` — client options
-- `VisitorRemoteDataSource` — HTTP `/chatscript/visitor/*`
-- `VisitorSocketDataSource` — Socket.IO (`message_to_client`, `typing`)
-- `VisitorRepository` — domain contract
-- `VisitorChatService` — orchestrates session → poll/socket → activity
-
-Gemini remains available via `apiKey`; custom backends via `customService`.
-
-
----
 
 ## Getting Started
 
@@ -56,11 +42,11 @@ Add this package to your Flutter project's `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  support_chat:
-    path: ../support_chat # or use pub.dev dependency path when published
+  chat_support_widget: ^0.0.1
 ```
 
 Run package resolution:
+
 ```bash
 flutter pub get
 ```
@@ -69,11 +55,9 @@ flutter pub get
 
 ## Basic Usage
 
-If you want to use the **default premium UI** (matching the designed mockup), simply use the widget out of the box:
-
 ```dart
 import 'package:flutter/material.dart';
-import 'package:support_chat/support_chat.dart';
+import 'package:chat_support_widget/chat_support_widget.dart';
 
 void main() {
   runApp(const MyApp());
@@ -92,13 +76,17 @@ class MyApp extends StatelessWidget {
             height: 600,
             child: SupportChatWidget(
               config: SupportChatConfig(
-                apiKey: 'YOUR_GEMINI_API_KEY', // Supply your Gemini API key here
+                visitorConfig: VisitorConfig(
+                  baseUrl: 'https://your-chatscript-host',
+                  tenantId: 'your-tenant-id',
+                  url: 'https://example.com',
+                  title: 'Home',
+                  isMobile: true,
+                  domain: 'example.com',
+                ),
                 userData: const SupportUserData(
                   name: 'Imran Computer',
                   email: 'imran@example.com',
-                  metadata: {
-                    'account_tier': 'Gold VIP',
-                  },
                 ),
               ),
             ),
@@ -114,15 +102,14 @@ class MyApp extends StatelessWidget {
 
 ## Advanced Customization: Overriding UI Components
 
-Anyone using this package can fully customize the look and feel of the widget using custom builders:
-
 ### 1. Custom AppBar / Header Builder
+
 ```dart
 SupportChatWidget(
   config: config,
   headerBuilder: (context, config, isOnline) {
     return Container(
-      color: Colors.red, // Custom color
+      color: Colors.red,
       padding: const EdgeInsets.all(16.0),
       child: Text(
         'Custom App Bar - ${config.headerTitle}',
@@ -134,6 +121,7 @@ SupportChatWidget(
 ```
 
 ### 2. Custom Welcome Sub-header Builder
+
 ```dart
 SupportChatWidget(
   config: config,
@@ -148,6 +136,7 @@ SupportChatWidget(
 ```
 
 ### 3. Custom Chat Bubbles Builder
+
 ```dart
 SupportChatWidget(
   config: config,
@@ -180,6 +169,7 @@ SupportChatWidget(
 ```
 
 ### 4. Custom Bottom Input Field & Toolbar Builder
+
 ```dart
 SupportChatWidget(
   config: config,

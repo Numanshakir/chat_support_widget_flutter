@@ -12,12 +12,13 @@ import '../services/chatbot_service.dart';
 import '../services/visitor_chat_service.dart';
 
 class SupportChatConfig {
-  final String? apiKey;
   final SupportUserData? userData;
   final String? deviceId;
 
+  /// Optional custom backend. Defaults to [VisitorChatService] via [visitorConfig].
   final ChatbotService? customService;
 
+  /// Chatscript visitor SDK config (session, activity, polling, Socket.IO).
   final VisitorConfig? visitorConfig;
 
   final String botName;
@@ -27,22 +28,18 @@ class SupportChatConfig {
 
   final String subHeaderSubtitle;
 
-  final String? systemInstructions;
-
   const SupportChatConfig({
-    this.apiKey,
     this.userData,
     this.deviceId,
     this.customService,
     this.visitorConfig,
-    this.botName = 'AI Assistant',
+    this.botName = 'Support',
     this.headerTitle = 'support',
     this.subHeaderTitle = 'live support',
     this.subHeaderSubtitle = 'Ask us anything',
-    this.systemInstructions,
   }) : assert(
-         apiKey != null || customService != null || visitorConfig != null,
-         'Either apiKey, customService, or visitorConfig must be provided.',
+         customService != null || visitorConfig != null,
+         'Either visitorConfig or customService must be provided.',
        );
 }
 
@@ -88,6 +85,15 @@ class SupportChatWidget extends StatefulWidget {
   /// Callback when the exit/reset button is pressed.
   final VoidCallback? onExitPressed;
 
+  /// Callback when the header minimize (−) icon is pressed — typically closes the chat.
+  final VoidCallback? onMinimizePressed;
+
+  /// Callback when the header expand (□) icon is pressed — typically toggles fullscreen.
+  final VoidCallback? onExpandPressed;
+
+  /// Whether the chat is currently shown fullscreen (controls expand icon).
+  final bool isExpanded;
+
   /// Callback when the attachment (paperclip) button is pressed.
   /// Should return an [AttachmentFile] representing the selected image.
   final Future<AttachmentFile?> Function()? onAttachmentPressed;
@@ -117,6 +123,9 @@ class SupportChatWidget extends StatefulWidget {
     this.onSessionReady,
     this.onUpdateInfoPressed,
     this.onExitPressed,
+    this.onMinimizePressed,
+    this.onExpandPressed,
+    this.isExpanded = false,
     this.onAttachmentPressed,
     this.onMenuPressed,
     this.headerBuilder,
@@ -146,7 +155,7 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
   bool _sessionLoggedOut = false;
   bool _isSoundOn = true;
   final LayerLink _menuLayerLink = LayerLink();
-  OverlayEntry? _menuOverlayEntry;
+  bool _isMenuOpen = false;
 
   @override
   void initState() {
@@ -157,19 +166,10 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
         widget.config.deviceId ??
         'Session-${DateTime.now().millisecondsSinceEpoch}';
 
-    // Initialize chatbot backend service
-    if (widget.config.customService != null) {
-      _chatbotService = widget.config.customService!;
-    } else if (widget.config.visitorConfig != null) {
-      _chatbotService = VisitorChatService(widget.config.visitorConfig!);
-    } else {
-      _chatbotService = GeminiChatbotService(
-        apiKey: widget.config.apiKey!,
-        customSystemInstruction:
-            widget.config.systemInstructions ??
-            'You are a helpful and polite Live Support AI Assistant. Answer the user\'s queries precisely. If the user attaches an image, analyze it carefully and reply based on it.',
-      );
-    }
+    // Visitor SDK by default; optional customService for tests / alternate backends.
+    _chatbotService =
+        widget.config.customService ??
+        VisitorChatService(widget.config.visitorConfig!);
 
     // Load initial greeting and system state
     _localUserData = widget.config.userData;
@@ -215,9 +215,7 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
           _isOnline = true;
           _sessionReady = true;
           _messages.add(
-            ChatMessage.system(
-              'Session ready · chat with session $sessionId',
-            ),
+            ChatMessage.system('Session ready · chat with session $sessionId'),
           );
         });
         widget.onSessionReady?.call(tenantId, sessionId);
@@ -252,7 +250,7 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
 
   @override
   void dispose() {
-    _hideMenu();
+    _isMenuOpen = false;
     _eventsSubscription?.cancel();
     unawaited(_chatbotService.dispose());
     _inputController.dispose();
@@ -347,9 +345,8 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
         deviceId: _activeDeviceId,
       );
 
-      // Realtime backends (visitor SDK) deliver agent replies via events.
+      // Visitor SDK delivers agent replies via events; keep typing until then.
       if (_chatbotService.usesRealtimeDelivery || reply == null) {
-        // Keep typing indicator while waiting for bot/agent; clear on timeout.
         Future<void>.delayed(const Duration(seconds: 45), () {
           if (mounted && _isTyping) {
             setState(() => _isTyping = false);
@@ -399,10 +396,7 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
               _localUserData?.email ?? widget.config.userData?.email ?? '',
           sessionReady: _sessionReady,
           onSubmit: (name, email) async {
-            await _chatbotService.updateVisitorInfo(
-              name: name,
-              email: email,
-            );
+            await _chatbotService.updateVisitorInfo(name: name, email: email);
           },
         );
       },
@@ -424,7 +418,8 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
               _localUserData?.email ?? widget.config.userData?.email ?? '',
           sessionReady: _sessionReady,
           onSubmit: (email) async {
-            final currentName = _localUserData?.name ?? widget.config.userData?.name ?? '';
+            final currentName =
+                _localUserData?.name ?? widget.config.userData?.name ?? '';
             await _chatbotService.updateVisitorInfo(
               name: currentName,
               email: email,
@@ -436,7 +431,9 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
 
     if (result != null && result.isNotEmpty && mounted) {
       setState(() {
-        _localUserData = (_localUserData ?? const SupportUserData()).copyWith(email: result);
+        _localUserData = (_localUserData ?? const SupportUserData()).copyWith(
+          email: result,
+        );
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Transcript will be sent to $result')),
@@ -445,104 +442,85 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
   }
 
   void _toggleMenu() {
-    if (_menuOverlayEntry != null) {
-      _hideMenu();
-    } else {
-      _showMenu();
-    }
+    setState(() {
+      _isMenuOpen = !_isMenuOpen;
+    });
   }
 
   void _hideMenu() {
-    _menuOverlayEntry?.remove();
-    _menuOverlayEntry = null;
-  }
-
-  void _showMenu() {
-    _menuOverlayEntry = OverlayEntry(
-      builder: (context) {
-        return GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTap: _hideMenu,
-          child: Stack(
-            children: [
-              Positioned(
-                child: CompositedTransformFollower(
-                  link: _menuLayerLink,
-                  showWhenUnlinked: false,
-                  targetAnchor: Alignment.topRight,
-                  followerAnchor: Alignment.bottomRight,
-                  offset: const Offset(0, -8),
-                  child: Material(
-                    color: Colors.transparent,
-                    child: _buildMenuContent(),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-
-    Overlay.of(context).insert(_menuOverlayEntry!);
+    if (!_isMenuOpen) return;
+    if (!mounted) {
+      _isMenuOpen = false;
+      return;
+    }
+    setState(() {
+      _isMenuOpen = false;
+    });
   }
 
   Widget _buildMenuContent() {
-    return Container(
-      width: 240,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.08),
-            blurRadius: 16,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildMenuItem(
-            title: 'Sound',
-            trailing: Text(
-              _isSoundOn ? 'On' : 'Off',
-              style: const TextStyle(
-                fontSize: 14,
-                color: Color(0xFF6B7280),
+    return Material(
+      color: Colors.transparent,
+      elevation: 0,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 200),
+        child: Container(
+          width: 200,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(24),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.08),
+                blurRadius: 16,
+                offset: const Offset(0, 4),
               ),
-            ),
-            onTap: () {
-              setState(() {
-                _isSoundOn = !_isSoundOn;
-              });
-              _menuOverlayEntry?.markNeedsBuild();
-            },
+            ],
           ),
-          _buildMenuItem(
-            title: 'Email Transcript',
-            onTap: () {
-              _hideMenu();
-              _showEmailTranscriptDialog();
-            },
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildMenuItem(
+                title: 'Sound',
+                trailing: Text(
+                  _isSoundOn ? 'On' : 'Off',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Color(0xFF6B7280),
+                  ),
+                ),
+                onTap: () {
+                  setState(() {
+                    _isSoundOn = !_isSoundOn;
+                  });
+                },
+              ),
+              _buildMenuItem(
+                title: 'Email Transcript',
+                onTap: () {
+                  _hideMenu();
+                  _showEmailTranscriptDialog();
+                },
+              ),
+              _buildMenuItem(
+                title: 'Edit Contact detail',
+                onTap: () {
+                  _hideMenu();
+                  _showUpdateInfoDialog();
+                },
+              ),
+              _buildMenuItem(
+                title: 'End Chat',
+                onTap: () {
+                  _hideMenu();
+                  _handleExitPressed();
+                },
+              ),
+            ],
           ),
-          _buildMenuItem(
-            title: 'Edit Contact detail',
-            onTap: () {
-              _hideMenu();
-              _showUpdateInfoDialog();
-            },
-          ),
-          _buildMenuItem(
-            title: 'End Chat',
-            onTap: () {
-              _hideMenu();
-              _handleExitPressed();
-            },
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -581,16 +559,25 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
+          backgroundColor: Colors.white,
           title: const Text('Logout'),
           content: const Text(
             'Are you sure you want to end this chat session?',
           ),
           actions: [
             TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.black,
+                // backgroundColor: widget.primaryColor,
+              ),
               onPressed: () => Navigator.of(dialogContext).pop(false),
               child: const Text('Cancel'),
             ),
             FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: widget.primaryColor,
+                foregroundColor: Colors.white,
+              ),
               onPressed: () => Navigator.of(dialogContext).pop(true),
               child: const Text('Logout'),
             ),
@@ -626,84 +613,112 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
       clipBehavior: Clip.antiAlias,
       child: Material(
         color: Colors.white,
-        child: Column(
+        child: Stack(
+          clipBehavior: Clip.hardEdge,
           children: [
-            // 1. Main Header / App Bar
-            widget.headerBuilder != null
-                ? widget.headerBuilder!(context, widget.config, _isOnline)
-                : _buildDefaultHeader(),
+            Column(
+              children: [
+                // 1. Main Header / App Bar
+                widget.headerBuilder != null
+                    ? widget.headerBuilder!(context, widget.config, _isOnline)
+                    : _buildDefaultHeader(),
 
-            // 2. Sub Header Live Support Banner
-            widget.subHeaderBuilder != null
-                ? widget.subHeaderBuilder!(context, widget.config)
-                : _buildDefaultSubHeader(),
+                // 2. Sub Header Live Support Banner
+                widget.subHeaderBuilder != null
+                    ? widget.subHeaderBuilder!(context, widget.config)
+                    : _buildDefaultSubHeader(),
 
-            // 3. Chat Message Log — Expanded so keyboard shrinks this area.
-            Expanded(
-              child: Container(
-                color: widget.backgroundColor,
-                child: ListView.builder(
-                  controller: _scrollController,
-                  keyboardDismissBehavior:
-                      ScrollViewKeyboardDismissBehavior.onDrag,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16.0,
-                    vertical: 12.0,
+                // 3. Chat Message Log — Expanded so keyboard shrinks this area.
+                Expanded(
+                  child: Container(
+                    color: widget.backgroundColor,
+                    child: ListView.builder(
+                      controller: _scrollController,
+                      keyboardDismissBehavior:
+                          ScrollViewKeyboardDismissBehavior.onDrag,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16.0,
+                        vertical: 12.0,
+                      ),
+                      itemCount: _messages.length,
+                      itemBuilder: (context, index) {
+                        final message = _messages[index];
+                        final timeStr = DateFormat(
+                          'h:mm a',
+                        ).format(message.timestamp);
+
+                        // User Custom Bubble Builder support
+                        if (widget.bubbleBuilder != null) {
+                          return widget.bubbleBuilder!(
+                            context,
+                            message,
+                            timeStr,
+                          );
+                        }
+
+                        if (message.sender == MessageSender.system) {
+                          return _buildDefaultSystemMessage(message);
+                        } else if (message.sender == MessageSender.user) {
+                          return _buildDefaultUserBubble(message, timeStr);
+                        } else {
+                          return _buildDefaultAssistantBubble(message, timeStr);
+                        }
+                      },
+                    ),
                   ),
-                  itemCount: _messages.length,
-                  itemBuilder: (context, index) {
-                    final message = _messages[index];
-                    final timeStr = DateFormat(
-                      'h:mm a',
-                    ).format(message.timestamp);
-
-                    // User Custom Bubble Builder support
-                    if (widget.bubbleBuilder != null) {
-                      return widget.bubbleBuilder!(context, message, timeStr);
-                    }
-
-                    if (message.sender == MessageSender.system) {
-                      return _buildDefaultSystemMessage(message);
-                    } else if (message.sender == MessageSender.user) {
-                      return _buildDefaultUserBubble(message, timeStr);
-                    } else {
-                      return _buildDefaultAssistantBubble(message, timeStr);
-                    }
-                  },
                 ),
-              ),
+
+                if (_isTyping && widget.inputBuilder == null)
+                  Container(
+                    color: widget.backgroundColor,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 24.0,
+                      vertical: 4.0,
+                    ),
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '${widget.config.botName} is typing...',
+                      style: TextStyle(
+                        fontSize: 12.0,
+                        color: Colors.grey.shade600,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ),
+
+                // 4. Chat Input Section
+                widget.inputBuilder != null
+                    ? widget.inputBuilder!(
+                        context,
+                        _inputController,
+                        _isTyping,
+                        _pendingAttachment,
+                        _handleAttachmentSelection,
+                        _handleRemoveAttachment,
+                        _sendMessage,
+                      )
+                    : _buildDefaultInputSection(),
+              ],
             ),
-
-            if (_isTyping && widget.inputBuilder == null)
-              Container(
-                color: widget.backgroundColor,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 24.0,
-                  vertical: 4.0,
-                ),
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  '${widget.config.botName} is typing...',
-                  style: TextStyle(
-                    fontSize: 12.0,
-                    color: Colors.grey.shade600,
-                    fontStyle: FontStyle.italic,
-                  ),
+            if (_isMenuOpen) ...[
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _hideMenu,
+                  child: const ColoredBox(color: Colors.transparent),
                 ),
               ),
-
-            // 4. Chat Input Section
-            widget.inputBuilder != null
-                ? widget.inputBuilder!(
-                    context,
-                    _inputController,
-                    _isTyping,
-                    _pendingAttachment,
-                    _handleAttachmentSelection,
-                    _handleRemoveAttachment,
-                    _sendMessage,
-                  )
-                : _buildDefaultInputSection(),
+              CompositedTransformFollower(
+                link: _menuLayerLink,
+                showWhenUnlinked: false,
+                // Button sits on the right; open menu upward + left so it
+                // stays fully inside the chatbot popup.
+                targetAnchor: Alignment.topRight,
+                followerAnchor: Alignment.bottomRight,
+                offset: const Offset(0, -8),
+                child: _buildMenuContent(),
+              ),
+            ],
           ],
         ),
       ),
@@ -774,19 +789,21 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
           IconButton(
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(),
-            icon: const Icon(
-              Icons.crop_square,
+            tooltip: widget.isExpanded ? 'Exit fullscreen' : 'Fullscreen',
+            icon: Icon(
+              widget.isExpanded ? Icons.fullscreen_exit : Icons.crop_square,
               color: Colors.white70,
               size: 20.0,
             ),
-            onPressed: () {},
+            onPressed: widget.onExpandPressed,
           ),
           const SizedBox(width: 12.0),
           IconButton(
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(),
+            tooltip: 'Close',
             icon: const Icon(Icons.remove, color: Colors.white70, size: 22.0),
-            onPressed: () {},
+            onPressed: widget.onMinimizePressed ?? widget.onExitPressed,
           ),
         ],
       ),
@@ -1127,11 +1144,6 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
                 icon: const Icon(Icons.exit_to_app, color: Colors.black54),
                 onPressed: _handleExitPressed,
               ),
-              // Attachment selection handler
-              IconButton(
-                icon: const Icon(Icons.attach_file, color: Colors.black54),
-                onPressed: _handleAttachmentSelection,
-              ),
               CompositedTransformTarget(
                 link: _menuLayerLink,
                 child: IconButton(
@@ -1139,7 +1151,8 @@ class _SupportChatWidgetState extends State<SupportChatWidget> {
                   onPressed: _toggleMenu,
                 ),
               ),
-              const Spacer(),
+              SizedBox(width: 10),
+              // const Spacer(),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: widget.primaryColor,
@@ -1229,14 +1242,12 @@ class _UpdateInfoDialogState extends State<_UpdateInfoDialog> {
     try {
       await widget.onSubmit(name, email);
       if (!mounted) return;
-      Navigator.of(context).pop(
-        SupportUserData(name: name, email: email),
-      );
+      Navigator.of(context).pop(SupportUserData(name: name, email: email));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not update info: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not update info: $e')));
     } finally {
       if (mounted) {
         setState(() => _isSubmitting = false);
@@ -1249,9 +1260,7 @@ class _UpdateInfoDialogState extends State<_UpdateInfoDialog> {
     return Dialog(
       backgroundColor: Colors.white,
       surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(24),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
       child: Container(
         width: 380,
         padding: const EdgeInsets.only(bottom: 24),
@@ -1260,10 +1269,7 @@ class _UpdateInfoDialogState extends State<_UpdateInfoDialog> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: 24,
-                vertical: 20,
-              ),
+              padding: EdgeInsets.symmetric(horizontal: 24, vertical: 20),
               child: Text(
                 'Edit contact details',
                 style: TextStyle(
@@ -1273,11 +1279,7 @@ class _UpdateInfoDialogState extends State<_UpdateInfoDialog> {
                 ),
               ),
             ),
-            const Divider(
-              height: 1,
-              thickness: 1,
-              color: Color(0xFFE2E8F0),
-            ),
+            const Divider(height: 1, thickness: 1, color: Color(0xFFE2E8F0)),
             Padding(
               padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
               child: Column(
@@ -1404,7 +1406,7 @@ class _UpdateInfoDialogState extends State<_UpdateInfoDialog> {
                       ElevatedButton(
                         onPressed: _isSubmitting ? null : _save,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFD9730D),
+                          backgroundColor: Color(0xFF2B5AD9),
                           foregroundColor: Colors.white,
                           elevation: 0,
                           shape: RoundedRectangleBorder(
@@ -1421,8 +1423,9 @@ class _UpdateInfoDialogState extends State<_UpdateInfoDialog> {
                                 height: 18,
                                 child: CircularProgressIndicator(
                                   strokeWidth: 2,
-                                  valueColor:
-                                      AlwaysStoppedAnimation<Color>(Colors.white),
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.white,
+                                  ),
                                 ),
                               )
                             : const Text(
@@ -1480,9 +1483,9 @@ class _EmailTranscriptDialogState extends State<_EmailTranscriptDialog> {
     final email = _emailController.text.trim();
 
     if (email.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter an email.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Please enter an email.')));
       return;
     }
 
@@ -1518,9 +1521,7 @@ class _EmailTranscriptDialogState extends State<_EmailTranscriptDialog> {
     return Dialog(
       backgroundColor: Colors.white,
       surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(24),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
       child: Container(
         width: 380,
         padding: const EdgeInsets.only(bottom: 24),
@@ -1529,10 +1530,7 @@ class _EmailTranscriptDialogState extends State<_EmailTranscriptDialog> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: 24,
-                vertical: 20,
-              ),
+              padding: EdgeInsets.symmetric(horizontal: 24, vertical: 20),
               child: Text(
                 'Email chat Transcript',
                 style: TextStyle(
@@ -1542,11 +1540,7 @@ class _EmailTranscriptDialogState extends State<_EmailTranscriptDialog> {
                 ),
               ),
             ),
-            const Divider(
-              height: 1,
-              thickness: 1,
-              color: Color(0xFFE2E8F0),
-            ),
+            const Divider(height: 1, thickness: 1, color: Color(0xFFE2E8F0)),
             Padding(
               padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
               child: Column(
@@ -1629,7 +1623,7 @@ class _EmailTranscriptDialogState extends State<_EmailTranscriptDialog> {
                       ElevatedButton(
                         onPressed: _isSubmitting ? null : _save,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFD9730D),
+                          backgroundColor: Color(0xFF2B5AD9),
                           foregroundColor: Colors.white,
                           elevation: 0,
                           shape: RoundedRectangleBorder(
@@ -1646,8 +1640,9 @@ class _EmailTranscriptDialogState extends State<_EmailTranscriptDialog> {
                                 height: 18,
                                 child: CircularProgressIndicator(
                                   strokeWidth: 2,
-                                  valueColor:
-                                      AlwaysStoppedAnimation<Color>(Colors.white),
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.white,
+                                  ),
                                 ),
                               )
                             : const Text(
