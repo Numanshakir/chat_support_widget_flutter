@@ -1,42 +1,23 @@
 # chat_support_widget
 
-A Flutter package for live customer support chat using the **chatscript visitor JSON API** (session, activity, polling, Socket.IO). The default UI matches a premium support-agent interface and can be customized with builders for header, subheader, bubbles, and input.
+A Flutter package that provides a ready-to-use live customer support chat widget with a polished agent UI, real-time messaging, and full customization hooks.
 
 ---
 
-## Features
+## ✨ Features
 
-- **Visitor SDK:** JSON endpoints (`/chatscript/visitor/session`, `/polling`, `/activity`) with Socket.IO realtime and polling fallback
-- **Live agent chat:** Session create/reconnect, send messages, forms (name/email), typing, logout/expire
-- **Visual fidelity:** Blue header, online status, welcome banner, styled bubbles, custom avatars
-- **UI customization:** Override layout with `headerBuilder`, `subHeaderBuilder`, `bubbleBuilder`, and `inputBuilder`
+- 🎯 **Drop-in Widget** — Add live support chat with `SupportChatWidget`
+- 💬 **Beautiful Chat UI** — Modern chat interface with header, bubbles, and smooth scrolling
+- 🎨 **Fully Customizable** — Colors, builders, titles, and positioning
+- 👤 **Live Agent Chat** — Real-time messaging with support agents
+- 🔌 **Socket.IO Support** — Real-time communication with polling fallback
+- ⌨️ **Typing Indicator** — Shows when the agent is typing
+- 📱 **Responsive** — Works on all screen sizes
 
 ---
 
-## Visitor SDK Backend
 
-```dart
-SupportChatWidget(
-  config: SupportChatConfig(
-    visitorConfig: VisitorConfig(
-      baseUrl: 'https://your-chatscript-host',
-      tenantId: 'tenant-id',
-      url: 'https://example.com',
-      title: 'Home',
-      isMobile: true,
-      domain: 'example.com',
-      enableSocket: true,
-    ),
-    userData: const SupportUserData(
-      name: 'Imran',
-      email: 'imran@example.com',
-    ),
-  ),
-)
-```
-
-
-## Getting Started
+## Installation
 
 Add this package to your Flutter project's `pubspec.yaml`:
 
@@ -85,8 +66,8 @@ class MyApp extends StatelessWidget {
                   domain: 'example.com',
                 ),
                 userData: const SupportUserData(
-                  name: 'Imran Computer',
-                  email: 'imran@example.com',
+                  name: 'Example',
+                  email: 'example@example.com',
                 ),
               ),
             ),
