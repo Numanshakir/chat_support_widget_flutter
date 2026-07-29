@@ -1,7 +1,7 @@
 name: chat_support_widget
 description: "A Flutter package that adds a live customer support chat widget with a customizable agent chat UI to your app."
 version: 0.0.1
-homepage:
+homepage: https://github.com/Numanshakir/chat_support_widget_flutter.git
 
 environment:
   sdk: ^3.12.2
