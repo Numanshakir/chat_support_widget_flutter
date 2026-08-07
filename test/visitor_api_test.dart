@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:chat_support_widget/src/data/models/create_session_request_dto.dart';
-import 'package:chat_support_widget/src/data/models/create_session_response_dto.dart';
-import 'package:chat_support_widget/src/data/models/polling_response_dto.dart';
-import 'package:chat_support_widget/src/domain/entities/visitor_activity.dart';
+import 'package:talktroves_chatsdk/src/data/models/create_session_request_dto.dart';
+import 'package:talktroves_chatsdk/src/data/models/create_session_response_dto.dart';
+import 'package:talktroves_chatsdk/src/data/models/polling_response_dto.dart';
+import 'package:talktroves_chatsdk/src/domain/entities/visitor_activity.dart';
 
 void main() {
   group('CreateSessionRequestDto', () {

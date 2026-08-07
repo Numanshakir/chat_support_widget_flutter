@@ -1,4 +1,4 @@
-name: chat_support_widget
+name: talktroves_chatsdk
 description: "A Flutter package that adds a live customer support chat widget with a customizable agent chat UI to your app."
 version: 0.0.1
 homepage: https://github.com/Numanshakir/chat_support_widget_flutter.git

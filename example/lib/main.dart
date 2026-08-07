@@ -3,7 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:chat_support_widget/chat_support_widget.dart';
+import 'package:talktroves_chatsdk/talktroves_chatsdk.dart';
 
 import 'talk_troves_config.dart';
 
